@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XAU Sentinel — Gold Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --edge:#30363d; --gold:#d4af37; --txt:#e6e6e6; --dim:#8b949e; --up:#3fb950; --down:#f85149; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--txt); font-family:'Segoe UI',system-ui,sans-serif; padding:18px; }
+  h1 { font-size:1.35rem; color:var(--gold); letter-spacing:1px; }
+  .sub { color:var(--dim); font-size:.8rem; margin-bottom:14px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:16px; }
+  .card { background:var(--card); border:1px solid var(--edge); border-radius:10px; padding:12px 14px; }
+  .card .label { color:var(--dim); font-size:.68rem; text-transform:uppercase; letter-spacing:1px; }
+  .card .value { font-size:1.5rem; font-weight:600; margin-top:4px; }
+  .up { color:var(--up); } .down { color:var(--down); } .gold { color:var(--gold); }
+  .row { display:grid; grid-template-columns:2fr 1fr; gap:12px; }
+  @media(max-width:800px){ .row{grid-template-columns:1fr;} }
+  .panel { background:var(--card); border:1px solid var(--edge); border-radius:10px; padding:14px; }
+  .panel h2 { font-size:.85rem; color:var(--dim); text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+  table { width:100%; border-collapse:collapse; font-size:.85rem; }
+  td,th { padding:6px 8px; border-bottom:1px solid var(--edge); text-align:left; }
+  th { color:var(--dim); font-weight:500; font-size:.72rem; text-transform:uppercase; }
+  .lv-R { color:#f85149; } .lv-S { color:#3fb950; }
+  .near { background:rgba(212,175,55,.12); border-radius:4px; padding:0 4px; }
+  .sess { display:inline-block; padding:2px 8px; border-radius:12px; font-size:.72rem; margin-right:6px; }
+  .sess.on { background:#1d3a1f; color:var(--up); } .sess.off { background:#22282f; color:var(--dim); }
+  .foot { color:var(--dim); font-size:.7rem; margin-top:14px; }
+  .refresh { float:right; background:var(--edge); color:var(--txt); border:0; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:.8rem; }
+</style>
+</head>
+<body>
+  <div style="display:flex; align-items:center;">
+    <div style="flex:1">
+      <h1>XAU SENTINEL</h1>
+      <div class="sub">Gold (XAUUSD) dashboard — for Fortune · data: COMEX futures proxy · not financial advice</div>
+    </div>
+    <button class="refresh" onclick="load()">↻ Refresh</button>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="label">Live price (proxy)</div><div class="value gold" id="price">—</div></div>
+    <div class="card"><div class="label">Day change</div><div class="value" id="chg">—</div></div>
+    <div class="card"><div class="label">Day high</div><div class="value" id="hi">—</div></div>
+    <div class="card"><div class="label">Day low</div><div class="value" id="lo">—</div></div>
+    <div class="card"><div class="label">Nairobi time</div><div class="value" id="clock">—</div></div>
+  </div>
+
+  <div class="panel" style="margin-bottom:12px">
+    <h2>Trading sessions (Nairobi)</h2>
+    <div><span class="sess" id="syd">Sydney 00:00–09:00</span>
+         <span class="sess" id="lon">London 12:00–21:00</span>
+         <span class="sess" id="ny">New York 17:00–02:00</span></div>
+  </div>
+
+  <div class="row">
+    <div class="panel"><h2>Price — 5 days (30m)</h2><canvas id="chart"></canvas></div>
+    <div class="panel"><h2>Watched levels</h2>
+      <table id="levels"><thead><tr><th>Level</th><th>Price</th><th>Distance</th></tr></thead><tbody></tbody></table>
+      <div class="foot" style="margin-top:8px">Highlighted = within $3 of price. Confirm exact numbers on your MT5 chart.</div>
+    </div>
+  </div>
+
+  <div class="foot">Proxy = COMEX gold futures minus a fixed offset, since spot XAUUSD needs a paid feed. Levels auto-load from NEXA's watcher.</div>
+
+<script>
+const LEVELS = [
+  {kind:'R', price:4016.4, label:"resistance 2 — Friday swing high"},
+  {kind:'R', price:4007.5, label:"resistance 1 — bearish invalidation"},
+  {kind:'S', price:3985.2, label:"support 1 — weekly pivot"},
+  {kind:'S', price:3972.0, label:"support 2 — next demand"},
+  {kind:'S', price:3770.0, label:"major bear target"},
+];
+const OFFSET = 12; // futures minus spot approx
+
+function nairobiClock(){
+  const t = new Date().toLocaleTimeString('en-GB',{timeZone:'Africa/Nairobi'});
+  document.getElementById('clock').textContent = t;
+}
+setInterval(nairobiClock, 1000);
+
+function sessions(){
+  const h = parseInt(new Date().toLocaleString('en-GB',{timeZone:'Africa/Nairobi',hour:'2-digit',hour12:false}));
+  set('lon', h>=12 && h<21); set('ny', h>=17 || h<2); set('syd', h<9);
+  function set(id,on){ const e=document.getElementById(id); e.className='sess '+(on?'on':'off'); }
+}
+
+async function load(){
+  try{
+    const r = await fetch('/api/price');
+    const d = await r.json();
+    if(d.error){ document.getElementById('price').textContent='feed down'; return; }
+    const spot = (d.price - OFFSET).toFixed(2);
+    const el = document.getElementById('price');
+    el.textContent = spot;
+    const chg = document.getElementById('chg');
+    const dc = d.dayChange;
+    chg.textContent = (dc>=0?'+':'') + dc.toFixed(2) + ' (' + (dc>=0?'+':'') + (dc/ (d.price-dc) *100).toFixed(2) + '%)';
+    chg.className = 'value ' + (dc>=0?'up':'down');
+    document.getElementById('hi').textContent = (d.dayHigh - OFFSET).toFixed(2);
+    document.getElementById('lo').textContent = (d.dayLow - OFFSET).toFixed(2);
+    drawChart(d.times, d.closes);
+    levels(spot);
+  }catch(e){ document.getElementById('price').textContent='feed down'; }
+}
+
+function levels(spot){
+  const tb = document.querySelector('#levels tbody'); tb.innerHTML='';
+  const s = parseFloat(spot);
+  LEVELS.sort((a,b)=>b.price-a.price).forEach(l=>{
+    const dist = (s - l.price).toFixed(1);
+    const tr = document.createElement('tr');
+    const near = Math.abs(dist) <= 3;
+    tr.innerHTML = `<td class="lv-${l.kind}">${l.kind==='R'?'Resistance':'Support'} ${l.price}</td>
+                    <td class="${near?'near':''}">${l.price.toFixed(1)}</td>
+                    <td class="${dist>=0?'up':'down'}">${dist>=0?'+':''}${dist}</td>`;
+    tr.title = l.label;
+    tb.appendChild(tr);
+  });
+}
+
+let chart;
+function drawChart(times, closes){
+  const ctx = document.getElementById('chart').getContext('2d');
+  const data = closes.map(v=>v-OFFSET);
+  const up = data[data.length-1] >= data[0];
+  if(chart) chart.destroy();
+  chart = new Chart(ctx, { type:'line',
+    data:{ labels:times.map(t=>new Date(t*1000).toLocaleString('en-GB',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short',timeZone:'Africa/Nairobi'})),
+      datasets:[{ data, borderColor: up?'#3fb950':'#f85149', borderWidth:1.5, pointRadius:0, tension:.15 }]},
+    options:{ plugins:{legend:{display:false}}, scales:{ x:{ticks:{maxTicksLimit:10,color:'#8b949e'},grid:{color:'#1c2128'}}, y:{ticks:{color:'#8b949e'},grid:{color:'#1c2128'}} } } });
+}
+
+load(); setInterval(load, 60000); nairobiClock(); sessions(); setInterval(sessions, 30000);
+</script>
+</body>
+</html>
